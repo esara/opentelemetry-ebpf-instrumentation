@@ -55,25 +55,58 @@ func parsePostgresError(buf []uint8) *request.SQLError {
 
 Loop:
 	for offset < length {
+		// Ensure offset is still within bounds before accessing buffer
+		if offset >= length {
+			break Loop
+		}
+
 		errorCode := buf[offset]
 		offset++
 
 		switch errorCode {
 		case 'C': // SQLSTATE code
+			if offset+6 > length {
+				return nil // Malformed error packet
+			}
 			sqlErr.SQLState = unix.ByteSliceToString(buf[offset : offset+6])
 			offset += 6
 		case 'M': // Error message
-			sqlErr.Message = unix.ByteSliceToString(buf[offset:])
-			offset += len(sqlErr.Message) + 1
+			// Find the null terminator for the message
+			if offset >= length {
+				return nil // Malformed error packet
+			}
+			toSkip := bytes.IndexByte(buf[offset:], 0)
+			if toSkip < 0 {
+				// No null terminator found, message extends to end of buffer
+				sqlErr.Message = unix.ByteSliceToString(buf[offset:])
+				offset = length
+			} else {
+				if offset+toSkip > length {
+					return nil // Malformed error packet
+				}
+				sqlErr.Message = unix.ByteSliceToString(buf[offset : offset+toSkip])
+				offset += toSkip + 1
+			}
 		case 0: // End of error message
 			break Loop
 		default:
 			// Skip uninteresting fields
+			if offset >= length {
+				return nil // Malformed error packet
+			}
 			toSkip := bytes.IndexByte(buf[offset:], 0)
 			if toSkip < 0 {
 				return nil // Malformed error packet
 			}
+			if offset+toSkip >= length {
+				return nil // Malformed error packet
+			}
 			offset += toSkip + 1
+		}
+
+		// Final safety check after processing each field
+		if offset > length {
+			return nil // Malformed error packet
 		}
 	}
 
